@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { parseScriptureReferences } from "./lib/scriptureParser";
 import { useAudioCapture } from "./hooks/useAudioCapture";
 import { useAudioLevel } from "./hooks/useAudioLevel";
@@ -208,31 +208,79 @@ function AudioSourcePanel() {
   );
 }
 
+function VerseSlide({ verse, translationName }) {
+  return (
+    <>
+      <div style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+        {verse.book_name} {verse.chapter}:{verse.verse} · {translationName}
+      </div>
+      <div style={{ marginTop: 8, fontSize: 16, lineHeight: 1.6 }}>{verse.text?.trim()}</div>
+    </>
+  );
+}
+
 function ScriptureSearchPanel() {
   const [text, setText] = useState("");
   const [translation, setTranslation] = useState("kjv");
+  const [activeMatch, setActiveMatch] = useState(null); // what the preview is browsing
+  const [slideIndex, setSlideIndex] = useState(0);
   const [lookup, setLookup] = useState({ status: "idle" }); // idle | loading | done | error
+  const [liveSlide, setLiveSlide] = useState(null); // what's actually pushed live
 
   const matches = parseScriptureReferences(text);
 
-  const fetchVerse = useCallback(
-    async (match) => {
-      setLookup({ status: "loading" });
+  const selectMatch = (match) => {
+    setLookup({ status: "loading" });
+    setActiveMatch(match);
+  };
+
+  const handleTranslationChange = (e) => {
+    if (activeMatch) setLookup({ status: "loading" });
+    setTranslation(e.target.value);
+  };
+
+  // Fetches when a match is selected or translation changes while one's
+  // active. `ignore` guards against a race: if translation is switched
+  // again before a slower request resolves, that stale response is
+  // dropped instead of overwriting the newer one. Loading state is set by
+  // the event handlers above, not synchronously here — this effect's own
+  // setState calls only ever fire inside the async callback, after a real
+  // external system (the fetch) has actually resolved.
+  useEffect(() => {
+    if (!activeMatch) return;
+    let ignore = false;
+
+    (async () => {
       try {
-        const range = match.verseStart
-          ? `${match.verseStart}${match.verseEnd ? "-" + match.verseEnd : ""}`
+        const range = activeMatch.verseStart
+          ? `${activeMatch.verseStart}${activeMatch.verseEnd ? "-" + activeMatch.verseEnd : ""}`
           : "";
-        const ref = `${match.book}+${match.chapter}${range ? ":" + range : ""}`;
+        const ref = `${activeMatch.book}+${activeMatch.chapter}${range ? ":" + range : ""}`;
         const res = await fetch(`${VERSE_API}/${encodeURIComponent(ref)}?translation=${translation}`);
         if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
         const data = await res.json();
-        setLookup({ status: "done", data });
+        if (!ignore) {
+          setLookup({ status: "done", data });
+          setSlideIndex(0);
+        }
       } catch (err) {
-        setLookup({ status: "error", message: err.message });
+        if (!ignore) setLookup({ status: "error", message: err.message });
       }
-    },
-    [translation]
-  );
+    })();
+
+    return () => {
+      ignore = true;
+    };
+  }, [activeMatch, translation]);
+
+  const verses = lookup.status === "done" ? lookup.data.verses || [] : [];
+  const currentVerse = verses[slideIndex];
+  const translationName = lookup.status === "done" ? lookup.data.translation_name : "";
+
+  const pushLive = () => {
+    if (!currentVerse) return;
+    setLiveSlide({ verse: currentVerse, translationName });
+  };
 
   return (
     <section
@@ -249,10 +297,7 @@ function ScriptureSearchPanel() {
         </div>
         <select
           value={translation}
-          onChange={(e) => {
-            setTranslation(e.target.value);
-            setLookup({ status: "idle" });
-          }}
+          onChange={handleTranslationChange}
           style={{ padding: "5px 8px", borderRadius: 4, fontSize: 12 }}
         >
           {TRANSLATIONS.map((t) => (
@@ -265,10 +310,7 @@ function ScriptureSearchPanel() {
 
       <input
         value={text}
-        onChange={(e) => {
-          setText(e.target.value);
-          setLookup({ status: "idle" });
-        }}
+        onChange={(e) => setText(e.target.value)}
         placeholder='Try: "turn to Romans chapter 8 verse 28"'
         style={{ width: "100%", padding: "10px 12px", borderRadius: 4, marginTop: 12, fontSize: 15 }}
       />
@@ -300,7 +342,7 @@ function ScriptureSearchPanel() {
             <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
               <ConfidenceMeter confidence={m.confidence} />
               <button
-                onClick={() => fetchVerse(m)}
+                onClick={() => selectMatch(m)}
                 style={{
                   background: "var(--amber)",
                   color: "#241703",
@@ -311,35 +353,141 @@ function ScriptureSearchPanel() {
                   fontSize: 13,
                 }}
               >
-                Look up
+                Preview
               </button>
             </div>
           </div>
         ))}
       </div>
 
-      {lookup.status === "loading" && (
-        <div style={{ marginTop: 16, color: "var(--text-muted)", fontSize: 14 }}>Fetching…</div>
-      )}
-      {lookup.status === "error" && (
-        <div style={{ marginTop: 16, color: "var(--rose)", fontSize: 14 }}>{lookup.message}</div>
-      )}
-      {lookup.status === "done" && (
+      {/* Preview — updates as you browse or switch translation. Never what the congregation sees. */}
+      <div
+        style={{
+          marginTop: 16,
+          padding: 16,
+          background: "var(--bg)",
+          border: "1px solid var(--border)",
+          borderRadius: 4,
+        }}
+      >
         <div
           style={{
-            marginTop: 16,
-            padding: 16,
-            background: "var(--bg)",
-            border: "1px solid var(--border)",
-            borderRadius: 4,
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--text-muted)",
+            letterSpacing: 1,
+            marginBottom: 10,
           }}
         >
-          <div style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-            {lookup.data.reference} · {lookup.data.translation_name || "KJV"}
-          </div>
-          <div style={{ marginTop: 8, fontSize: 16, lineHeight: 1.6 }}>{lookup.data.text?.trim()}</div>
+          PREVIEW
         </div>
-      )}
+
+        {!activeMatch && (
+          <div style={{ color: "var(--text-muted)", fontSize: 14 }}>
+            Hit Preview on a match above to browse it here.
+          </div>
+        )}
+        {lookup.status === "loading" && <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Fetching…</div>}
+        {lookup.status === "error" && <div style={{ color: "var(--rose)", fontSize: 14 }}>{lookup.message}</div>}
+        {lookup.status === "done" && currentVerse && (
+          <>
+            <VerseSlide verse={currentVerse} translationName={translationName} />
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  disabled={slideIndex === 0}
+                  onClick={() => setSlideIndex((i) => Math.max(0, i - 1))}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid var(--border)",
+                    color: "var(--text)",
+                    padding: "6px 12px",
+                    borderRadius: 4,
+                    fontSize: 13,
+                    opacity: slideIndex === 0 ? 0.4 : 1,
+                  }}
+                >
+                  ← Previous
+                </button>
+                <button
+                  disabled={slideIndex >= verses.length - 1}
+                  onClick={() => setSlideIndex((i) => Math.min(verses.length - 1, i + 1))}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid var(--border)",
+                    color: "var(--text)",
+                    padding: "6px 12px",
+                    borderRadius: 4,
+                    fontSize: 13,
+                    opacity: slideIndex >= verses.length - 1 ? 0.4 : 1,
+                  }}
+                >
+                  Next →
+                </button>
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 12,
+                    color: "var(--text-muted)",
+                    alignSelf: "center",
+                    marginLeft: 4,
+                  }}
+                >
+                  {slideIndex + 1} / {verses.length}
+                </span>
+              </div>
+
+              <button
+                onClick={pushLive}
+                style={{
+                  background: "var(--rose)",
+                  color: "#2a0a12",
+                  border: "none",
+                  padding: "8px 16px",
+                  borderRadius: 4,
+                  fontWeight: 600,
+                  fontSize: 13,
+                }}
+              >
+                Push live
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Live — only changes when Push live is clicked. This is the congregation-facing state. */}
+      <div
+        style={{
+          marginTop: 12,
+          padding: 16,
+          background: "var(--bg)",
+          border: liveSlide ? "1px solid var(--rose)" : "1px solid var(--border)",
+          borderRadius: 4,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: liveSlide ? "var(--rose)" : "var(--text-muted)",
+            letterSpacing: 1,
+            marginBottom: liveSlide ? 10 : 0,
+          }}
+        >
+          {liveSlide && <span className="pulse-dot pulse-dot--live" />}
+          LIVE
+        </div>
+        {liveSlide ? (
+          <VerseSlide verse={liveSlide.verse} translationName={liveSlide.translationName} />
+        ) : (
+          <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Nothing live yet.</div>
+        )}
+      </div>
     </section>
   );
 }
