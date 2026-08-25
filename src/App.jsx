@@ -1,10 +1,22 @@
 import { useState, useEffect, useCallback } from "react";
 import { parseScriptureReferences } from "./lib/scriptureParser";
 import { useAudioCapture } from "./hooks/useAudioCapture";
+import { useAudioLevel } from "./hooks/useAudioLevel";
 
 // Public-domain source — see schema.sql header. Swap for API.Bible if the
 // service reads from a copyrighted translation (NIV/AMP/NKJV).
 const VERSE_API = "https://bible-api.com";
+
+// Only public-domain translations bible-api.com actually serves — confirmed
+// against its own docs, not guessed. NIV/AMP/NKJV aren't on this list because
+// they're copyrighted; that needs API.Bible with a real license instead.
+const TRANSLATIONS = [
+  { id: "kjv", label: "King James Version" },
+  { id: "web", label: "World English Bible" },
+  { id: "asv", label: "American Standard Version" },
+  { id: "bbe", label: "Bible in Basic English" },
+  { id: "darby", label: "Darby Bible" },
+];
 
 function ConfidenceMeter({ confidence }) {
   // Five-tick readout instead of a percentage or progress bar — legible at
@@ -22,6 +34,7 @@ function ConfidenceMeter({ confidence }) {
             height: 14,
             background: i < filled ? color : "var(--border)",
             borderRadius: 1,
+            transition: "background 200ms ease",
           }}
         />
       ))}
@@ -29,9 +42,57 @@ function ConfidenceMeter({ confidence }) {
   );
 }
 
+function AudioLevelMeter({ bars, level, active }) {
+  // The actual fix for "nothing happens when I speak" — this is live signal,
+  // not decoration. Bars that don't move while you're talking means the
+  // capture itself is broken; bars that move confirm it's working and the
+  // silence is just "no transcription yet," which is expected right now.
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-end",
+          gap: 3,
+          height: 48,
+          padding: "0 2px",
+        }}
+        aria-hidden="true"
+      >
+        {bars.map((v, i) => (
+          <div
+            key={i}
+            style={{
+              flex: 1,
+              height: `${Math.max(4, v)}%`,
+              background: !active ? "var(--border)" : v > 60 ? "var(--rose)" : v > 25 ? "var(--amber)" : "var(--green)",
+              borderRadius: 1,
+              transition: "height 60ms linear, background 120ms ease",
+            }}
+          />
+        ))}
+      </div>
+      <div
+        style={{
+          marginTop: 6,
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "var(--text-muted)",
+          display: "flex",
+          justifyContent: "space-between",
+        }}
+      >
+        <span>INPUT LEVEL</span>
+        <span style={{ color: active ? "var(--text)" : "var(--text-muted)" }}>{active ? `${level}%` : "—"}</span>
+      </div>
+    </div>
+  );
+}
+
 function AudioSourcePanel() {
   const { devices, activeDeviceId, activeSourceType, stream, error, refreshDevices, startCapture, stopCapture } =
     useAudioCapture();
+  const { bars, level } = useAudioLevel(stream);
   const [selectedDevice, setSelectedDevice] = useState("");
   const [sourceType, setSourceType] = useState("line");
 
@@ -117,10 +178,15 @@ function AudioSourcePanel() {
         </button>
       </div>
 
+      <div style={{ marginTop: 18 }}>
+        <AudioLevelMeter bars={bars} level={level} active={!!stream} />
+      </div>
+
       <div style={{ marginTop: 12, fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-muted)" }}>
         {stream ? (
-          <span style={{ color: "var(--green)" }}>
-            ● capturing — {activeSourceType} profile ({activeDeviceId?.slice(0, 8)})
+          <span style={{ color: "var(--green)", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span className="pulse-dot" />
+            capturing — {activeSourceType} profile ({activeDeviceId?.slice(0, 8)})
           </span>
         ) : (
           <span>○ idle</span>
@@ -134,8 +200,9 @@ function AudioSourcePanel() {
       )}
 
       <div style={{ marginTop: 14, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-        This panel only proves capture works end to end — device picked up, stream live. It does not
-        transcribe yet. That's the STT service, next phase.
+        Bars react to input level — that's proof capture is live. There's still no transcription
+        yet (that's the STT service, next phase), so speaking won't produce text here, only movement
+        in the meter above.
       </div>
     </section>
   );
@@ -143,25 +210,29 @@ function AudioSourcePanel() {
 
 function ScriptureSearchPanel() {
   const [text, setText] = useState("");
+  const [translation, setTranslation] = useState("kjv");
   const [lookup, setLookup] = useState({ status: "idle" }); // idle | loading | done | error
 
   const matches = parseScriptureReferences(text);
 
-  const fetchVerse = useCallback(async (match) => {
-    setLookup({ status: "loading" });
-    try {
-      const range = match.verseStart
-        ? `${match.verseStart}${match.verseEnd ? "-" + match.verseEnd : ""}`
-        : "";
-      const ref = `${match.book}+${match.chapter}${range ? ":" + range : ""}`;
-      const res = await fetch(`${VERSE_API}/${encodeURIComponent(ref)}?translation=kjv`);
-      if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
-      const data = await res.json();
-      setLookup({ status: "done", data });
-    } catch (err) {
-      setLookup({ status: "error", message: err.message });
-    }
-  }, []);
+  const fetchVerse = useCallback(
+    async (match) => {
+      setLookup({ status: "loading" });
+      try {
+        const range = match.verseStart
+          ? `${match.verseStart}${match.verseEnd ? "-" + match.verseEnd : ""}`
+          : "";
+        const ref = `${match.book}+${match.chapter}${range ? ":" + range : ""}`;
+        const res = await fetch(`${VERSE_API}/${encodeURIComponent(ref)}?translation=${translation}`);
+        if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
+        const data = await res.json();
+        setLookup({ status: "done", data });
+      } catch (err) {
+        setLookup({ status: "error", message: err.message });
+      }
+    },
+    [translation]
+  );
 
   return (
     <section
@@ -172,8 +243,24 @@ function ScriptureSearchPanel() {
         padding: 20,
       }}
     >
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)", letterSpacing: 1 }}>
-        MANUAL SEARCH
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)", letterSpacing: 1 }}>
+          MANUAL SEARCH
+        </div>
+        <select
+          value={translation}
+          onChange={(e) => {
+            setTranslation(e.target.value);
+            setLookup({ status: "idle" });
+          }}
+          style={{ padding: "5px 8px", borderRadius: 4, fontSize: 12 }}
+        >
+          {TRANSLATIONS.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
+            </option>
+          ))}
+        </select>
       </div>
 
       <input
