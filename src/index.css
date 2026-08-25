@@ -1,0 +1,65 @@
+/*
+  Palette rationale: this runs on a screen in a dim booth during a live
+  service. High contrast and fast glance-legibility matter more than
+  personality. Amber = pending/standby (broadcast tally-light convention),
+  green = confirmed, muted rose = low confidence — reused consistently
+  rather than decoratively.
+*/
+:root {
+  --bg: #0b0d10;
+  --panel: #14171c;
+  --border: #262b33;
+  --text: #e8e6e1;
+  --text-muted: #8a8f98;
+  --amber: #e8a33d;
+  --green: #3ddc84;
+  --rose: #c9506b;
+
+  --font-sans: -apple-system, system-ui, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+input,
+select {
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
