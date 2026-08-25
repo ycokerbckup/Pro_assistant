@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { parseScriptureReferences } from "./lib/scriptureParser";
+import { suggestBooks } from "./lib/bookAutocomplete";
 import { useAudioCapture } from "./hooks/useAudioCapture";
 import { useAudioLevel } from "./hooks/useAudioLevel";
 
@@ -8,8 +9,9 @@ import { useAudioLevel } from "./hooks/useAudioLevel";
 const VERSE_API = "https://bible-api.com";
 
 // Only public-domain translations bible-api.com actually serves — confirmed
-// against its own docs, not guessed. NIV/AMP/NKJV aren't on this list because
-// they're copyrighted; that needs API.Bible with a real license instead.
+// against its own docs, not guessed. NIV/AMP/NKJV/NLT/TPT/ESV/TLB/MSG/AMPC
+// aren't on this list because they're copyrighted; each needs its own
+// license (API.Bible or the publisher directly) before it can be added.
 const TRANSLATIONS = [
   { id: "kjv", label: "King James Version" },
   { id: "web", label: "World English Bible" },
@@ -19,9 +21,6 @@ const TRANSLATIONS = [
 ];
 
 function ConfidenceMeter({ confidence }) {
-  // Five-tick readout instead of a percentage or progress bar — legible at
-  // a glance from a few feet away in a dim booth, which a precise number
-  // isn't. Color band communicates the same thing a number would, faster.
   const filled = Math.round(confidence * 5);
   const color = confidence >= 0.85 ? "var(--green)" : confidence >= 0.6 ? "var(--amber)" : "var(--rose)";
   return (
@@ -43,22 +42,9 @@ function ConfidenceMeter({ confidence }) {
 }
 
 function AudioLevelMeter({ bars, level, active }) {
-  // The actual fix for "nothing happens when I speak" — this is live signal,
-  // not decoration. Bars that don't move while you're talking means the
-  // capture itself is broken; bars that move confirm it's working and the
-  // silence is just "no transcription yet," which is expected right now.
   return (
     <div>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-end",
-          gap: 3,
-          height: 48,
-          padding: "0 2px",
-        }}
-        aria-hidden="true"
-      >
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 48, padding: "0 2px" }} aria-hidden="true">
         {bars.map((v, i) => (
           <div
             key={i}
@@ -101,14 +87,7 @@ function AudioSourcePanel() {
   }, [refreshDevices]);
 
   return (
-    <section
-      style={{
-        background: "var(--panel)",
-        border: "1px solid var(--border)",
-        borderRadius: 6,
-        padding: 20,
-      }}
-    >
+    <section style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: 20 }}>
       <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)", letterSpacing: 1 }}>
         AUDIO SOURCE
       </div>
@@ -170,10 +149,7 @@ function AudioSourcePanel() {
           </button>
         )}
 
-        <button
-          onClick={refreshDevices}
-          style={{ background: "none", border: "none", color: "var(--text-muted)", fontSize: 13 }}
-        >
+        <button onClick={refreshDevices} style={{ background: "none", border: "none", color: "var(--text-muted)", fontSize: 13 }}>
           Refresh devices
         </button>
       </div>
@@ -193,11 +169,7 @@ function AudioSourcePanel() {
         )}
       </div>
 
-      {error && (
-        <div style={{ marginTop: 10, color: "var(--rose)", fontSize: 13 }}>
-          {error}
-        </div>
-      )}
+      {error && <div style={{ marginTop: 10, color: "var(--rose)", fontSize: 13 }}>{error}</div>}
 
       <div style={{ marginTop: 14, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
         Bars react to input level — that's proof capture is live. There's still no transcription
@@ -219,33 +191,78 @@ function VerseSlide({ verse, translationName }) {
   );
 }
 
+function SlideRow({ slide, isPreview, isLive, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        width: "100%",
+        textAlign: "left",
+        background: isPreview ? "var(--bg)" : "transparent",
+        border: `1px solid ${isPreview ? "var(--amber)" : "var(--border)"}`,
+        borderRadius: 4,
+        padding: "6px 10px",
+        fontSize: 12,
+        cursor: "pointer",
+        color: "var(--text)",
+        flexShrink: 0,
+      }}
+    >
+      <span style={{ fontFamily: "var(--font-mono)" }}>
+        {slide.book_name} {slide.chapter}:{slide.verse}{" "}
+        <span style={{ color: "var(--text-muted)" }}>· {slide.translationAbbrev}</span>
+      </span>
+      {isLive && <span className="pulse-dot pulse-dot--live" />}
+    </button>
+  );
+}
+
 function ScriptureSearchPanel() {
   const [text, setText] = useState("");
   const [translation, setTranslation] = useState("kjv");
-  const [activeMatch, setActiveMatch] = useState(null); // what the preview is browsing
-  const [slideIndex, setSlideIndex] = useState(0);
-  const [lookup, setLookup] = useState({ status: "idle" }); // idle | loading | done | error
-  const [liveSlide, setLiveSlide] = useState(null); // what's actually pushed live
+  const [activeMatch, setActiveMatch] = useState(null);
+  const [lookupStatus, setLookupStatus] = useState("idle"); // idle | loading | error
+  const [lookupError, setLookupError] = useState("");
+
+  // The whole slide deck — every verse ever opened this session, in order.
+  // Preview and Live each get an independent pointer into it, mirroring a
+  // broadcast preview/program bus rather than a single shared cursor.
+  const [deck, setDeck] = useState([]);
+  const [previewIndex, setPreviewIndex] = useState(null);
+  const [liveIndex, setLiveIndex] = useState(null);
+  const deckRef = useRef([]);
+
+  useEffect(() => {
+    deckRef.current = deck;
+  }, [deck]);
 
   const matches = parseScriptureReferences(text);
 
+  // Fuzzy, visible, clickable — never auto-applied. See bookAutocomplete.js.
+  const bookQuery = (text.match(/^[^\d]*/)?.[0] || "").trim();
+  const suggestions = matches.length === 0 && bookQuery.length >= 2 ? suggestBooks(bookQuery) : [];
+
+  const applySuggestion = (book) => {
+    const rest = text.slice(bookQuery.length).replace(/^\s+/, "");
+    setText(`${book} ${rest}`);
+  };
+
   const selectMatch = (match) => {
-    setLookup({ status: "loading" });
+    setLookupStatus("loading");
     setActiveMatch(match);
   };
 
   const handleTranslationChange = (e) => {
-    if (activeMatch) setLookup({ status: "loading" });
+    if (activeMatch) setLookupStatus("loading");
     setTranslation(e.target.value);
   };
 
-  // Fetches when a match is selected or translation changes while one's
-  // active. `ignore` guards against a race: if translation is switched
-  // again before a slower request resolves, that stale response is
-  // dropped instead of overwriting the newer one. Loading state is set by
-  // the event handlers above, not synchronously here — this effect's own
-  // setState calls only ever fire inside the async callback, after a real
-  // external system (the fetch) has actually resolved.
+  // Race-guarded fetch: switching translation or match again before a
+  // slower request resolves drops the stale response instead of letting
+  // it overwrite a newer one.
   useEffect(() => {
     if (!activeMatch) return;
     let ignore = false;
@@ -259,12 +276,27 @@ function ScriptureSearchPanel() {
         const res = await fetch(`${VERSE_API}/${encodeURIComponent(ref)}?translation=${translation}`);
         if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
         const data = await res.json();
-        if (!ignore) {
-          setLookup({ status: "done", data });
-          setSlideIndex(0);
-        }
+        if (ignore) return;
+
+        const translationAbbrev = (data.translation_id || translation).toUpperCase();
+        const newSlides = (data.verses || []).map((v) => ({
+          book_name: v.book_name,
+          chapter: v.chapter,
+          verse: v.verse,
+          text: v.text,
+          translationName: data.translation_name,
+          translationAbbrev,
+        }));
+
+        const startIndex = deckRef.current.length;
+        setDeck((prev) => [...prev, ...newSlides]);
+        setPreviewIndex(startIndex);
+        setLookupStatus("idle");
       } catch (err) {
-        if (!ignore) setLookup({ status: "error", message: err.message });
+        if (!ignore) {
+          setLookupStatus("error");
+          setLookupError(err.message);
+        }
       }
     })();
 
@@ -273,24 +305,49 @@ function ScriptureSearchPanel() {
     };
   }, [activeMatch, translation]);
 
-  const verses = lookup.status === "done" ? lookup.data.verses || [] : [];
-  const currentVerse = verses[slideIndex];
-  const translationName = lookup.status === "done" ? lookup.data.translation_name : "";
+  // Global arrow-key handler advances Live directly, matching how a single
+  // operator actually drives ProPresenter during a live service — but never
+  // while focus is in a text input or select, or typing "2" for a verse
+  // number would also nudge the live slide.
+  useEffect(() => {
+    function handleKey(e) {
+      const tag = document.activeElement?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        e.preventDefault();
+        setLiveIndex((i) => (i === null ? null : Math.min(deck.length - 1, i + 1)));
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        e.preventDefault();
+        setLiveIndex((i) => (i === null ? null : Math.max(0, i - 1)));
+      }
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [deck.length]);
 
+  const previewSlide = previewIndex !== null ? deck[previewIndex] : null;
+  const liveSlide = liveIndex !== null ? deck[liveIndex] : null;
+
+  const previewPrev = () => setPreviewIndex((i) => (i === null ? null : Math.max(0, i - 1)));
+  const previewNext = () => setPreviewIndex((i) => (i === null ? null : Math.min(deck.length - 1, i + 1)));
+  const livePrev = () => setLiveIndex((i) => (i === null ? null : Math.max(0, i - 1)));
+  const liveNext = () => setLiveIndex((i) => (i === null ? null : Math.min(deck.length - 1, i + 1)));
   const pushLive = () => {
-    if (!currentVerse) return;
-    setLiveSlide({ verse: currentVerse, translationName });
+    if (previewIndex !== null) setLiveIndex(previewIndex);
   };
 
+  const navBtnStyle = (disabled) => ({
+    background: "transparent",
+    border: "1px solid var(--border)",
+    color: "var(--text)",
+    padding: "6px 12px",
+    borderRadius: 4,
+    fontSize: 13,
+    opacity: disabled ? 0.4 : 1,
+  });
+
   return (
-    <section
-      style={{
-        background: "var(--panel)",
-        border: "1px solid var(--border)",
-        borderRadius: 6,
-        padding: 20,
-      }}
-    >
+    <section style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)", letterSpacing: 1 }}>
           MANUAL SEARCH
@@ -315,8 +372,30 @@ function ScriptureSearchPanel() {
         style={{ width: "100%", padding: "10px 12px", borderRadius: 4, marginTop: 12, fontSize: 15 }}
       />
 
+      {suggestions.length > 0 && (
+        <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+          {suggestions.map((b) => (
+            <button
+              key={b}
+              onClick={() => applySuggestion(b)}
+              style={{
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                color: "var(--text-muted)",
+                padding: "4px 10px",
+                borderRadius: 12,
+                fontSize: 12,
+                cursor: "pointer",
+              }}
+            >
+              {b}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-        {matches.length === 0 && text.trim() && (
+        {matches.length === 0 && text.trim() && suggestions.length === 0 && (
           <div style={{ color: "var(--text-muted)", fontSize: 14 }}>No reference detected in that text.</div>
         )}
 
@@ -337,7 +416,7 @@ function ScriptureSearchPanel() {
                 {m.book} {m.chapter}
                 {m.verseStart ? `:${m.verseStart}${m.verseEnd ? "-" + m.verseEnd : ""}` : ""}
               </div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>“{m.matchedText}”</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>"{m.matchedText}"</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
               <ConfidenceMeter confidence={m.confidence} />
@@ -360,84 +439,37 @@ function ScriptureSearchPanel() {
         ))}
       </div>
 
-      {/* Preview — updates as you browse or switch translation. Never what the congregation sees. */}
-      <div
-        style={{
-          marginTop: 16,
-          padding: 16,
-          background: "var(--bg)",
-          border: "1px solid var(--border)",
-          borderRadius: 4,
-        }}
-      >
-        <div
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            color: "var(--text-muted)",
-            letterSpacing: 1,
-            marginBottom: 10,
-          }}
-        >
+      {/* Preview — updates as you browse, switch translation, or click a past slide. Never what the congregation sees. */}
+      <div style={{ marginTop: 16, padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4 }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", letterSpacing: 1, marginBottom: 10 }}>
           PREVIEW
         </div>
 
-        {!activeMatch && (
-          <div style={{ color: "var(--text-muted)", fontSize: 14 }}>
-            Hit Preview on a match above to browse it here.
-          </div>
+        {!previewSlide && lookupStatus === "idle" && (
+          <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Hit Preview on a match above to browse it here.</div>
         )}
-        {lookup.status === "loading" && <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Fetching…</div>}
-        {lookup.status === "error" && <div style={{ color: "var(--rose)", fontSize: 14 }}>{lookup.message}</div>}
-        {lookup.status === "done" && currentVerse && (
-          <>
-            <VerseSlide verse={currentVerse} translationName={translationName} />
+        {lookupStatus === "loading" && <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Fetching…</div>}
+        {lookupStatus === "error" && <div style={{ color: "var(--rose)", fontSize: 14 }}>{lookupError}</div>}
 
+        {previewSlide && (
+          <>
+            <VerseSlide verse={previewSlide} translationName={previewSlide.translationName} />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  disabled={slideIndex === 0}
-                  onClick={() => setSlideIndex((i) => Math.max(0, i - 1))}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    color: "var(--text)",
-                    padding: "6px 12px",
-                    borderRadius: 4,
-                    fontSize: 13,
-                    opacity: slideIndex === 0 ? 0.4 : 1,
-                  }}
-                >
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button disabled={previewIndex === 0} onClick={previewPrev} style={navBtnStyle(previewIndex === 0)}>
                   ← Previous
                 </button>
                 <button
-                  disabled={slideIndex >= verses.length - 1}
-                  onClick={() => setSlideIndex((i) => Math.min(verses.length - 1, i + 1))}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    color: "var(--text)",
-                    padding: "6px 12px",
-                    borderRadius: 4,
-                    fontSize: 13,
-                    opacity: slideIndex >= verses.length - 1 ? 0.4 : 1,
-                  }}
+                  disabled={previewIndex >= deck.length - 1}
+                  onClick={previewNext}
+                  style={navBtnStyle(previewIndex >= deck.length - 1)}
                 >
                   Next →
                 </button>
-                <span
-                  style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 12,
-                    color: "var(--text-muted)",
-                    alignSelf: "center",
-                    marginLeft: 4,
-                  }}
-                >
-                  {slideIndex + 1} / {verses.length}
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)", marginLeft: 4 }}>
+                  {previewIndex + 1} / {deck.length}
                 </span>
               </div>
-
               <button
                 onClick={pushLive}
                 style={{
@@ -455,9 +487,22 @@ function ScriptureSearchPanel() {
             </div>
           </>
         )}
+
+        {deck.length > 0 && (
+          <div style={{ marginTop: 16, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6, fontFamily: "var(--font-mono)" }}>
+              OPENED SLIDES ({deck.length})
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
+              {deck.map((s, i) => (
+                <SlideRow key={i} slide={s} isPreview={i === previewIndex} isLive={i === liveIndex} onClick={() => setPreviewIndex(i)} />
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Live — only changes when Push live is clicked. This is the congregation-facing state. */}
+      {/* Live — only changes on Push live, its own Prev/Next, or the arrow keys. This is the congregation-facing state. */}
       <div
         style={{
           marginTop: 12,
@@ -483,7 +528,22 @@ function ScriptureSearchPanel() {
           LIVE
         </div>
         {liveSlide ? (
-          <VerseSlide verse={liveSlide.verse} translationName={liveSlide.translationName} />
+          <>
+            <VerseSlide verse={liveSlide} translationName={liveSlide.translationName} />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button disabled={liveIndex === 0} onClick={livePrev} style={navBtnStyle(liveIndex === 0)}>
+                  ← Previous
+                </button>
+                <button disabled={liveIndex >= deck.length - 1} onClick={liveNext} style={navBtnStyle(liveIndex >= deck.length - 1)}>
+                  Next →
+                </button>
+              </div>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)" }}>
+                ← → keys also work (not while typing)
+              </span>
+            </div>
+          </>
         ) : (
           <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Nothing live yet.</div>
         )}
