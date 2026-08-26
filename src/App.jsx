@@ -154,43 +154,42 @@ function AudioSourcePanel() {
   );
 }
 
-function VerseSlide({ verse, translationName, size = "normal" }) {
-  return (
-    <>
-      <div style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-        {verse.book_name} {verse.chapter}:{verse.verse} · {translationName}
-      </div>
-      <div style={{ marginTop: 8, fontSize: size === "large" ? 20 : 16, lineHeight: 1.6, textAlign: size === "large" ? "center" : "left" }}>
-        {verse.text?.trim()}
-      </div>
-    </>
-  );
-}
-
-function SlideRow({ slide, isPreview, isLive, onClick }) {
+function SlideCard({ slide, isCursor, isLive, onClick }) {
   return (
     <button
       onClick={onClick}
       style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        width: "100%",
         textAlign: "left",
-        background: isPreview ? "var(--bg)" : "transparent",
-        border: `1px solid ${isPreview ? "var(--amber)" : "var(--border)"}`,
-        borderRadius: 4,
-        padding: "6px 10px",
-        fontSize: 12,
+        background: "var(--bg)",
+        border: `1px solid ${isLive ? "var(--rose)" : isCursor ? "var(--amber)" : "var(--border)"}`,
+        borderRadius: 6,
+        padding: 12,
         cursor: "pointer",
         color: "var(--text)",
-        flexShrink: 0,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        minHeight: 110,
       }}
     >
-      <span style={{ fontFamily: "var(--font-mono)" }}>
-        {slide.book_name} {slide.chapter}:{slide.verse} <span style={{ color: "var(--text-muted)" }}>· {slide.translationAbbrev}</span>
-      </span>
-      {isLive && <span className="pulse-dot pulse-dot--live" />}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)" }}>
+          {slide.book_name} {slide.chapter}:{slide.verse} · {slide.translationAbbrev}
+        </span>
+        {isLive && <span className="pulse-dot pulse-dot--live" />}
+      </div>
+      <div
+        style={{
+          fontSize: 13,
+          lineHeight: 1.5,
+          overflow: "hidden",
+          display: "-webkit-box",
+          WebkitLineClamp: 4,
+          WebkitBoxOrient: "vertical",
+        }}
+      >
+        {slide.text?.trim()}
+      </div>
     </button>
   );
 }
@@ -271,7 +270,6 @@ function SearchPanel({
   onApplySuggestion,
   onSelectMatch,
   onEnter,
-  previewSlide,
   previewIndex,
   previewBusy,
   previewBoundaryMsg,
@@ -279,10 +277,9 @@ function SearchPanel({
   lookupError,
   deck,
   liveIndex,
-  onPreviewPrev,
-  onPreviewNext,
-  onPushLive,
-  onJumpPreview,
+  onCursorPrev,
+  onCursorNext,
+  onSlideClick,
 }) {
   return (
     <section style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: 20 }}>
@@ -345,44 +342,45 @@ function SearchPanel({
         ))}
       </div>
 
-      <div style={{ marginTop: 16, padding: 16, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4 }}>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", letterSpacing: 1, marginBottom: 10 }}>PREVIEW</div>
+      <div style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", letterSpacing: 1 }}>
+            SLIDES {deck.length > 0 ? `(${deck.length})` : ""}
+          </div>
+          {deck.length > 0 && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <NavButton disabled={previewBusy} onClick={onCursorPrev}>
+                ← Previous
+              </NavButton>
+              <NavButton disabled={previewBusy} onClick={onCursorNext}>
+                Next →
+              </NavButton>
+              {previewBusy && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>…</span>}
+            </div>
+          )}
+        </div>
 
-        {!previewSlide && lookupStatus === "idle" && <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Hit Preview on a match above, or press Enter.</div>}
         {lookupStatus === "loading" && <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Fetching…</div>}
         {lookupStatus === "error" && <div style={{ color: "var(--rose)", fontSize: 14 }}>{lookupError}</div>}
-
-        {previewSlide && (
-          <>
-            <VerseSlide verse={previewSlide} translationName={previewSlide.translationName} />
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <NavButton disabled={previewBusy} onClick={onPreviewPrev}>
-                  ← Previous
-                </NavButton>
-                <NavButton disabled={previewBusy} onClick={onPreviewNext}>
-                  Next →
-                </NavButton>
-                {previewBusy && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>…</span>}
-              </div>
-              <button onClick={onPushLive} style={{ background: "var(--rose)", color: "#2a0a12", border: "none", padding: "8px 16px", borderRadius: 4, fontWeight: 600, fontSize: 13 }}>
-                Push live
-              </button>
-            </div>
-            {previewBoundaryMsg && <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-muted)" }}>{previewBoundaryMsg}</div>}
-          </>
+        {deck.length === 0 && lookupStatus === "idle" && (
+          <div style={{ color: "var(--text-muted)", fontSize: 14 }}>
+            Hit Preview on a match above, or press Enter, to open the first slide.
+          </div>
         )}
 
         {deck.length > 0 && (
-          <div style={{ marginTop: 16, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6, fontFamily: "var(--font-mono)" }}>OPENED SLIDES ({deck.length})</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
-              {deck.map((s, i) => (
-                <SlideRow key={i} slide={s} isPreview={i === previewIndex} isLive={i === liveIndex} onClick={() => onJumpPreview(i)} />
-              ))}
-            </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 8 }}>
+            {deck.map((s, i) => (
+              <SlideCard key={i} slide={s} isCursor={i === previewIndex} isLive={i === liveIndex} onClick={() => onSlideClick(i)} />
+            ))}
           </div>
         )}
+
+        {previewBoundaryMsg && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>{previewBoundaryMsg}</div>}
+
+        <div style={{ marginTop: 10, fontSize: 11, color: "var(--text-muted)" }}>
+          Click any slide to send it live. Previous/Next above browse without going live — the amber border shows where they're browsing from.
+        </div>
       </div>
     </section>
   );
@@ -564,14 +562,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const previewSlide = previewIndex !== null ? deck[previewIndex] : null;
   const liveSlide = liveIndex !== null ? deck[liveIndex] : null;
 
-  const pushLive = () => {
-    if (previewIndex !== null) {
-      setLiveIndex(previewIndex);
-      setLiveBoundaryMsg("");
-    }
+  const goLiveFromSlide = (i) => {
+    setLiveIndex(i);
+    setPreviewIndex(i);
+    setLiveBoundaryMsg("");
+    setPreviewBoundaryMsg("");
   };
 
   return (
@@ -597,7 +594,6 @@ export default function App() {
             onApplySuggestion={applySuggestion}
             onSelectMatch={selectMatch}
             onEnter={handleEnter}
-            previewSlide={previewSlide}
             previewIndex={previewIndex}
             previewBusy={previewBusy}
             previewBoundaryMsg={previewBoundaryMsg}
@@ -605,10 +601,9 @@ export default function App() {
             lookupError={lookupError}
             deck={deck}
             liveIndex={liveIndex}
-            onPreviewPrev={() => stepPane("preview", -1)}
-            onPreviewNext={() => stepPane("preview", 1)}
-            onPushLive={pushLive}
-            onJumpPreview={(i) => setPreviewIndex(i)}
+            onCursorPrev={() => stepPane("preview", -1)}
+            onCursorNext={() => stepPane("preview", 1)}
+            onSlideClick={goLiveFromSlide}
           />
         </div>
 
