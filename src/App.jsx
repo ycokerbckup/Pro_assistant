@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { parseScriptureReferences } from "./lib/scriptureParser";
 import { suggestBooks } from "./lib/bookAutocomplete";
 import { useAudioCapture } from "./hooks/useAudioCapture";
 import { useAudioLevel } from "./hooks/useAudioLevel";
+import { useSpeechRecognition } from "./hooks/useSpeechRecognition";
 
 const VERSE_API = "https://bible-api.com";
 
@@ -148,7 +149,87 @@ function AudioSourcePanel() {
       </div>
       {error && <div style={{ marginTop: 10, color: "var(--rose)", fontSize: 13 }}>{error}</div>}
       <div style={{ marginTop: 14, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-        Bars react to input level — that's proof capture is live. There's still no transcription yet, so speaking won't produce text here, only movement in the meter above.
+        Bars react to input level — that's proof capture is live. This panel is just the audio device
+        check; live transcription runs separately below, since Web Speech API manages its own mic access.
+      </div>
+    </section>
+  );
+}
+
+function TranscriptionPanel({ supported, listening, interimText, error, onStart, onStop, suggestions, onPreviewSuggestion, onDismissSuggestion }) {
+  return (
+    <section style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 6, padding: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)", letterSpacing: 1 }}>
+          LIVE TRANSCRIPTION (FREE / BROWSER-BASED)
+        </div>
+        {!listening ? (
+          <button
+            disabled={!supported}
+            onClick={onStart}
+            style={{ background: "var(--green)", color: "#06140c", border: "none", padding: "6px 14px", borderRadius: 4, fontWeight: 600, fontSize: 13, opacity: supported ? 1 : 0.4 }}
+          >
+            Start listening
+          </button>
+        ) : (
+          <button onClick={onStop} style={{ background: "transparent", color: "var(--rose)", border: "1px solid var(--rose)", padding: "6px 14px", borderRadius: 4, fontWeight: 600, fontSize: 13 }}>
+            Stop
+          </button>
+        )}
+      </div>
+
+      {!supported && <div style={{ marginTop: 10, fontSize: 13, color: "var(--rose)" }}>Not supported in this browser. Use Chrome, Edge, or Safari.</div>}
+      {error && <div style={{ marginTop: 10, fontSize: 13, color: "var(--rose)" }}>{error}</div>}
+
+      {listening && (
+        <div style={{ marginTop: 12, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span className="pulse-dot" />
+          listening… {interimText && <span style={{ color: "var(--text)" }}>"{interimText}"</span>}
+        </div>
+      )}
+
+      <div style={{ marginTop: 14 }}>
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8, fontFamily: "var(--font-mono)" }}>
+          DETECTED — REVIEW BEFORE USING ({suggestions.length})
+        </div>
+        {suggestions.length === 0 && (
+          <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
+            Nothing detected yet. References spoken aloud will show up here — nothing goes to a slide automatically.
+          </div>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {suggestions.map((s) => (
+            <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: "1px solid var(--border)", borderRadius: 4, padding: "8px 12px" }}>
+              <div>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 14 }}>
+                  {s.match.book} {s.match.chapter}
+                  {s.match.verseStart ? `:${s.match.verseStart}${s.match.verseEnd ? "-" + s.match.verseEnd : ""}` : ""}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>heard: "{s.snippet}"</div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={() => onDismissSuggestion(s.id)}
+                  style={{ background: "none", border: "1px solid var(--border)", color: "var(--text-muted)", padding: "5px 10px", borderRadius: 4, fontSize: 12 }}
+                >
+                  Dismiss
+                </button>
+                <button
+                  onClick={() => onPreviewSuggestion(s)}
+                  style={{ background: "var(--amber)", color: "#241703", border: "none", padding: "5px 10px", borderRadius: 4, fontWeight: 600, fontSize: 12 }}
+                >
+                  Preview
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 14, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+        Free, browser-only first pass — no server, no API key. It ignores the Audio Source device picker above
+        (it manages its own mic access) and won't catch every proper noun. Nothing here reaches a slide without
+        you clicking Preview — same confirm-first rule as manual search.
       </div>
     </section>
   );
@@ -400,6 +481,31 @@ export default function App() {
   const [liveBusy, setLiveBusy] = useState(false);
   const [previewBoundaryMsg, setPreviewBoundaryMsg] = useState("");
   const [liveBoundaryMsg, setLiveBoundaryMsg] = useState("");
+  const [transcriptSuggestions, setTranscriptSuggestions] = useState([]);
+
+  // Feeds live transcript text through the SAME deterministic parser used
+  // by manual search — no separate fuzzy/AI matching layer for spoken
+  // audio. Deduped against what's already pending so a reference the
+  // pastor keeps talking around doesn't spam the queue with repeats.
+  const handleFinalTranscript = useCallback((transcriptText) => {
+    const found = parseScriptureReferences(transcriptText);
+    if (found.length === 0) return;
+    setTranscriptSuggestions((prev) => {
+      const additions = found
+        .filter((m) => !prev.some((p) => p.match.book === m.book && p.match.chapter === m.chapter && p.match.verseStart === m.verseStart))
+        .map((m) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, match: m, snippet: transcriptText.trim() }));
+      return [...additions, ...prev].slice(0, 8);
+    });
+  }, []);
+
+  const {
+    supported: speechSupported,
+    listening: transcribing,
+    interimText,
+    error: speechError,
+    start: startTranscription,
+    stop: stopTranscription,
+  } = useSpeechRecognition(handleFinalTranscript);
 
   const deckRef = useRef([]);
   const previewIndexRef = useRef(null);
@@ -571,19 +677,39 @@ export default function App() {
     setPreviewBoundaryMsg("");
   };
 
+  const previewSuggestion = (s) => {
+    selectMatch(s.match);
+    setTranscriptSuggestions((prev) => prev.filter((p) => p.id !== s.id));
+  };
+
+  const dismissSuggestion = (id) => {
+    setTranscriptSuggestions((prev) => prev.filter((p) => p.id !== id));
+  };
+
   return (
     <div style={{ maxWidth: 1160, margin: "0 auto", padding: "40px 20px" }}>
       <div style={{ marginBottom: 28 }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--amber)", letterSpacing: 1 }}>HARVESTERS LEKKI — PHASE 1</div>
         <h1 style={{ margin: "6px 0 4px", fontSize: 26 }}>Scripture &amp; Lyrics Assistant</h1>
         <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 14 }}>
-          Manual search + audio capture smoke test. No live transcription or Supabase writes yet.
+          Free browser-based live transcription, manual search, and audio capture. No Supabase writes yet.
         </p>
       </div>
 
       <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 640px", display: "flex", flexDirection: "column", gap: 20, minWidth: 0 }}>
           <AudioSourcePanel />
+          <TranscriptionPanel
+            supported={speechSupported}
+            listening={transcribing}
+            interimText={interimText}
+            error={speechError}
+            onStart={startTranscription}
+            onStop={stopTranscription}
+            suggestions={transcriptSuggestions}
+            onPreviewSuggestion={previewSuggestion}
+            onDismissSuggestion={dismissSuggestion}
+          />
           <SearchPanel
             text={text}
             setText={setText}
